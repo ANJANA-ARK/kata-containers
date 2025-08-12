@@ -45,13 +45,16 @@ function setup_kbs_image_policy_for_initdata() {
     fi
 
     export CURRENT_ARCH=$(uname -m)
-    if [ "${CURRENT_ARCH}" != "x86_64" ]; then
-        skip "Test skipped as only x86-64 supports, while current platform is ${CURRENT_ARCH}"
-    fi
+    case "${CURRENT_ARCH}" in
+        "x86_64"|"s390x")
+            ;;
+        *)
+            skip "Test skipped as only x86-64 & s390x is supported, while current platform is ${CURRENT_ARCH}"
+            ;;
+    esac
 
-    # TODO: Enable for more archs
     case "$KATA_HYPERVISOR" in
-        "qemu-tdx"|"qemu-coco-dev")
+       "qemu-tdx"|"qemu-coco-dev"|"qemu-snp"|"qemu-se")
             ;;
         *)
             skip "Test not supported for ${KATA_HYPERVISOR}."
