@@ -154,3 +154,247 @@ pub fn get_process(
 
     Ok(ocip.clone())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::fs;
+    use tempfile::tempdir;
+    use oci_spec::runtime as oci;
+
+    // Helper to create metadata with annotation
+    fn create_metadata(key: &str, value: &str) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        metadata.insert(key.to_string(), value.to_string());
+        metadata
+    }
+
+    #[test]
+    fn test_copy_if_not_exists_success() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let src_path = temp_dir.path().join("source.txt");
+        let dst_path = temp_dir.path().join("subdir/dest.txt");
+
+        fs::write(&src_path, b"test content").expect("Failed to write source file");
+
+        let result = copy_if_not_exists(&src_path, &dst_path);
+        assert!(result.is_ok(), "copy_if_not_exists should succeed");
+        assert!(dst_path.exists(), "Destination file should exist");
+
+        let content = fs::read_to_string(&dst_path).expect("Failed to read dest file");
+        assert_eq!(content, "test content");
+    }
+
+    #[test]
+    fn test_copy_if_not_exists_creates_parent_dirs() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let src_path = temp_dir.path().join("source.txt");
+        let dst_path = temp_dir.path().join("deep/nested/path/dest.txt");
+
+        fs::write(&src_path, b"test").expect("Failed to write source file");
+
+        let result = copy_if_not_exists(&src_path, &dst_path);
+        assert!(result.is_ok(), "Should create parent directories");
+        assert!(dst_path.parent().unwrap().exists(), "Parent dirs should exist");
+    }
+
+    #[test]
+    fn test_copy_if_not_exists_overwrites_existing() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let src_path = temp_dir.path().join("source.txt");
+        let dst_path = temp_dir.path().join("dest.txt");
+
+        fs::write(&src_path, b"new content").expect("Failed to write source");
+        fs::write(&dst_path, b"old content").expect("Failed to write dest");
+
+        let result = copy_if_not_exists(&src_path, &dst_path);
+        assert!(result.is_ok(), "Should overwrite existing file");
+
+        let content = fs::read_to_string(&dst_path).expect("Failed to read dest");
+        assert_eq!(content, "new content", "Content should be updated");
+    }
+
+    #[test]
+    fn test_copy_if_not_exists_nonexistent_source() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let result = copy_if_not_exists(
+            &temp_dir.path().join("nonexistent.txt"),
+            &temp_dir.path().join("dest.txt")
+        );
+        assert!(result.is_err(), "Should fail with nonexistent source");
+    }
+
+    #[test]
+    fn test_is_sandbox_with_kubernetes_cri_type() {
+        let metadata = create_metadata("io.kubernetes.cri.container-type", "sandbox");
+        assert!(is_sandbox(&metadata), "Should identify sandbox container");
+    }
+
+    #[test]
+    fn test_is_sandbox_with_crio_type() {
+        let metadata = create_metadata("io.kubernetes.cri-o.ContainerType", "sandbox");
+        assert!(is_sandbox(&metadata), "Should identify sandbox with CRI-O annotation");
+    }
+
+    #[test]
+    fn test_is_sandbox_with_container_type() {
+        let metadata = create_metadata("io.kubernetes.cri.container-type", "container");
+        assert!(!is_sandbox(&metadata), "Should not identify regular container as sandbox");
+    }
+
+    #[test]
+    fn test_is_sandbox_with_no_metadata() {
+        assert!(!is_sandbox(&HashMap::new()), "Empty metadata should not be sandbox");
+    }
+
+    #[test]
+    fn test_is_sandbox_with_multiple_keys() {
+        let mut metadata = create_metadata("io.kubernetes.cri.container-type", "container");
+        metadata.insert("io.kubernetes.cri-o.ContainerType".to_string(), "sandbox".to_string());
+        assert!(is_sandbox(&metadata), "Should identify sandbox when any key matches");
+    }
+
+    #[test]
+    fn test_is_sandbox_case_sensitive() {
+        let metadata = create_metadata("io.kubernetes.cri.container-type", "Sandbox");
+        assert!(!is_sandbox(&metadata), "Should be case-sensitive");
+    }
+
+    #[test]
+    fn test_is_sandbox_with_extra_whitespace() {
+        let metadata = create_metadata("io.kubernetes.cri.container-type", " sandbox ");
+        assert!(!is_sandbox(&metadata), "Should not trim whitespace");
+    }
+
+    #[test]
+    fn test_get_process_without_guest_pull() {
+        let process = oci::ProcessBuilder::default()
+            .args(vec!["test".to_string()])
+            .build()
+            .expect("Failed to build process");
+
+        let spec = oci::SpecBuilder::default()
+            .process(process.clone())
+            .build()
+            .expect("Failed to build spec");
+
+        let storages = vec![];
+        let result = get_process(&process, &spec, storages);
+
+        assert!(result.is_ok(), "Should succeed without guest pull");
+        let returned_process = result.unwrap();
+        assert_eq!(returned_process.args(), process.args());
+    }
+
+    #[test]
+    fn test_get_process_with_non_guest_pull_storage() {
+        let process = oci::ProcessBuilder::default()
+            .args(vec!["test".to_string()])
+            .build()
+            .expect("Failed to build process");
+
+        let spec = oci::SpecBuilder::default()
+            .process(process.clone())
+            .build()
+            .expect("Failed to build spec");
+
+        let mut storage = protocols::agent::Storage::new();
+        storage.driver = "other-driver".to_string();
+        let storages = vec![storage];
+
+        let result = get_process(&process, &spec, storages);
+        assert!(result.is_ok(), "Should succeed with non-guest-pull storage");
+        let returned_process = result.unwrap();
+        assert_eq!(returned_process.args(), process.args());
+    }
+
+    #[test]
+    fn test_get_process_with_guest_pull_non_sandbox() {
+        let process = oci::ProcessBuilder::default()
+            .args(vec!["test".to_string()])
+            .build()
+            .expect("Failed to build process");
+
+        let mut annotations = HashMap::new();
+        annotations.insert("io.kubernetes.cri.container-type".to_string(), "container".to_string());
+
+        let spec = oci::SpecBuilder::default()
+            .process(process.clone())
+            .annotations(annotations)
+            .build()
+            .expect("Failed to build spec");
+
+        let mut storage = protocols::agent::Storage::new();
+        storage.driver = kata_types::mount::KATA_VIRTUAL_VOLUME_IMAGE_GUEST_PULL.to_string();
+        let storages = vec![storage];
+
+        let result = get_process(&process, &spec, storages);
+        assert!(result.is_ok(), "Should succeed for non-sandbox with guest pull");
+        let returned_process = result.unwrap();
+        assert_eq!(returned_process.args(), process.args());
+    }
+
+    #[test]
+    fn test_unpack_pause_image_invalid_cid() {
+        let invalid_cids = vec![
+            "../malicious",
+            "container/with/slash",
+            "container\0null",
+            "",
+        ];
+
+        for cid in invalid_cids {
+            let result = unpack_pause_image(cid);
+            assert!(result.is_err(), "Should reject invalid cid: {}", cid);
+        }
+    }
+
+    #[test]
+    fn test_unpack_pause_image_no_pause_bundle() {
+        // This test assumes KATA_PAUSE_BUNDLE doesn't exist
+        let result = unpack_pause_image("valid-container-id");
+        assert!(result.is_err(), "Should fail when pause bundle doesn't exist");
+        
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("Pause image not present"), 
+                "Error should mention missing pause image: {}", error_msg);
+        }
+    }
+
+    #[test]
+    fn test_get_pause_image_process_no_bundle() {
+        let result = get_pause_image_process();
+        assert!(result.is_err(), "Should fail when pause bundle doesn't exist");
+        
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("Pause image not present"), 
+                "Error should mention missing pause image: {}", error_msg);
+        }
+    }
+
+    #[test]
+    fn test_kata_image_work_dir_constant() {
+        assert_eq!(KATA_IMAGE_WORK_DIR, "/run/kata-containers/image/");
+    }
+
+    #[test]
+    fn test_config_json_constant() {
+        assert_eq!(CONFIG_JSON, "config.json");
+    }
+
+    #[test]
+    fn test_kata_pause_bundle_constant() {
+        assert_eq!(KATA_PAUSE_BUNDLE, "/pause_bundle");
+    }
+
+    #[test]
+    fn test_k8s_container_type_keys() {
+        assert_eq!(K8S_CONTAINER_TYPE_KEYS.len(), 2);
+        assert_eq!(K8S_CONTAINER_TYPE_KEYS[0], "io.kubernetes.cri.container-type");
+        assert_eq!(K8S_CONTAINER_TYPE_KEYS[1], "io.kubernetes.cri-o.ContainerType");
+    }
+}
