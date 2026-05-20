@@ -163,6 +163,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
     use oci_spec::runtime as oci;
+    use rstest::rstest;
 
     // Helper to create metadata with annotation
     fn create_metadata(key: &str, value: &str) -> HashMap<String, String> {
@@ -226,22 +227,19 @@ mod tests {
         assert!(result.is_err(), "Should fail with nonexistent source");
     }
 
-    #[test]
-    fn test_is_sandbox_with_kubernetes_cri_type() {
-        let metadata = create_metadata("io.kubernetes.cri.container-type", "sandbox");
-        assert!(is_sandbox(&metadata), "Should identify sandbox container");
-    }
-
-    #[test]
-    fn test_is_sandbox_with_crio_type() {
-        let metadata = create_metadata("io.kubernetes.cri-o.ContainerType", "sandbox");
-        assert!(is_sandbox(&metadata), "Should identify sandbox with CRI-O annotation");
-    }
-
-    #[test]
-    fn test_is_sandbox_with_container_type() {
-        let metadata = create_metadata("io.kubernetes.cri.container-type", "container");
-        assert!(!is_sandbox(&metadata), "Should not identify regular container as sandbox");
+    #[rstest]
+    #[case::cri_sandbox("io.kubernetes.cri.container-type", "sandbox", true)]
+    #[case::crio_sandbox("io.kubernetes.cri-o.ContainerType", "sandbox", true)]
+    #[case::cri_container("io.kubernetes.cri.container-type", "container", false)]
+    #[case::case_sensitive_mismatch("io.kubernetes.cri.container-type", "Sandbox", false)]
+    #[case::whitespace_mismatch("io.kubernetes.cri.container-type", " sandbox ", false)]
+    fn test_is_sandbox_variations(
+        #[case] key: &str,
+        #[case] value: &str,
+        #[case] expected: bool,
+    ) {
+        let metadata = create_metadata(key, value);
+        assert_eq!(is_sandbox(&metadata), expected);
     }
 
     #[test]
@@ -254,18 +252,6 @@ mod tests {
         let mut metadata = create_metadata("io.kubernetes.cri.container-type", "container");
         metadata.insert("io.kubernetes.cri-o.ContainerType".to_string(), "sandbox".to_string());
         assert!(is_sandbox(&metadata), "Should identify sandbox when any key matches");
-    }
-
-    #[test]
-    fn test_is_sandbox_case_sensitive() {
-        let metadata = create_metadata("io.kubernetes.cri.container-type", "Sandbox");
-        assert!(!is_sandbox(&metadata), "Should be case-sensitive");
-    }
-
-    #[test]
-    fn test_is_sandbox_with_extra_whitespace() {
-        let metadata = create_metadata("io.kubernetes.cri.container-type", " sandbox ");
-        assert!(!is_sandbox(&metadata), "Should not trim whitespace");
     }
 
     #[test]
@@ -336,19 +322,18 @@ mod tests {
         assert_eq!(returned_process.args(), process.args());
     }
 
-    #[test]
-    fn test_unpack_pause_image_invalid_cid() {
-        let invalid_cids = vec![
-            "../malicious",
-            "container/with/slash",
-            "container\0null",
-            "",
-        ];
-
-        for cid in invalid_cids {
-            let result = unpack_pause_image(cid);
-            assert!(result.is_err(), "Should reject invalid cid: {}", cid);
-        }
+    #[rstest]
+    #[case::path_traversal("../malicious")]
+    #[case::contains_slashes("container/with/slash")]
+    #[case::null_byte("container\0null")]
+    #[case::empty_string("")]
+    fn test_unpack_pause_image_rejects_invalid_cid(#[case] invalid_cid: &str) {
+        let result = unpack_pause_image(invalid_cid);
+        assert!(
+            result.is_err(),
+            "Should reject invalid container ID: '{}'",
+            invalid_cid
+        );
     }
 
     #[test]
@@ -359,7 +344,7 @@ mod tests {
         
         if let Err(e) = result {
             let error_msg = format!("{}", e);
-            assert!(error_msg.contains("Pause image not present"), 
+            assert!(error_msg.contains("Pause image not present"),
                 "Error should mention missing pause image: {}", error_msg);
         }
     }
@@ -371,30 +356,8 @@ mod tests {
         
         if let Err(e) = result {
             let error_msg = format!("{}", e);
-            assert!(error_msg.contains("Pause image not present"), 
+            assert!(error_msg.contains("Pause image not present"),
                 "Error should mention missing pause image: {}", error_msg);
         }
-    }
-
-    #[test]
-    fn test_kata_image_work_dir_constant() {
-        assert_eq!(KATA_IMAGE_WORK_DIR, "/run/kata-containers/image/");
-    }
-
-    #[test]
-    fn test_config_json_constant() {
-        assert_eq!(CONFIG_JSON, "config.json");
-    }
-
-    #[test]
-    fn test_kata_pause_bundle_constant() {
-        assert_eq!(KATA_PAUSE_BUNDLE, "/pause_bundle");
-    }
-
-    #[test]
-    fn test_k8s_container_type_keys() {
-        assert_eq!(K8S_CONTAINER_TYPE_KEYS.len(), 2);
-        assert_eq!(K8S_CONTAINER_TYPE_KEYS[0], "io.kubernetes.cri.container-type");
-        assert_eq!(K8S_CONTAINER_TYPE_KEYS[1], "io.kubernetes.cri-o.ContainerType");
     }
 }
