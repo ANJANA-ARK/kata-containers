@@ -305,7 +305,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use rstest::{fixture, rstest};
-    use serial_test::serial;
     use std::fs::File;
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -351,28 +350,8 @@ mod tests {
                 bail!("Server did not become ready within timeout");
             }
 
-            match CDHClient::new(uri) {
-                Ok(client) => {
-                    let mut input = confidential_data_hub::UnsealSecretInput::new();
-                    input.set_secret("sealed.readiness-check".into());
-
-                    match client
-                        .sealed_secret_client
-                        .unseal_secret(
-                            ttrpc::context::with_timeout(
-                                AGENT_CONFIG.cdh_api_timeout.as_nanos() as i64
-                            ),
-                            &input,
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            let _ = CDH_CLIENT.set(client);
-                            return Ok(());
-                        }
-                        Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-                    }
-                }
+            match ttrpc::asynchronous::Client::connect(uri) {
+                Ok(_) => return Ok(()),
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
@@ -441,7 +420,6 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    #[serial]
     async fn test_unseal_env_with_normal_value(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let _env = cdh_env.await;
@@ -453,7 +431,6 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    #[serial]
     async fn test_unseal_file_with_normal_file(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let env = cdh_env.await;
@@ -524,7 +501,6 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    #[serial]
     async fn test_unseal_env_empty_value(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let _env = cdh_env.await;
@@ -536,8 +512,6 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    #[serial]
-    #[serial]
     async fn test_unseal_file_nonexistent_path(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let _env = cdh_env.await;
@@ -555,7 +529,6 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    #[serial]
     async fn test_unseal_file_with_directory(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let env = cdh_env.await;
