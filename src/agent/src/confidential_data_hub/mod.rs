@@ -317,7 +317,6 @@ mod tests {
 
     struct CdhTestEnv {
         _test_dir: tempfile::TempDir,
-        pub cdh_sock_uri: String,
     }
 
     #[fixture]
@@ -340,12 +339,8 @@ mod tests {
         wait_for_server_ready(&cdh_sock_uri, Duration::from_secs(5))
             .await
             .expect("Server failed to start");
-        init_cdh_client(&cdh_sock_uri).await.unwrap();
 
-        CdhTestEnv {
-            _test_dir: test_dir,
-            cdh_sock_uri,
-        }
+        CdhTestEnv { _test_dir: test_dir }
     }
 
     async fn wait_for_server_ready(uri: &str, timeout: Duration) -> Result<()> {
@@ -355,8 +350,28 @@ mod tests {
                 bail!("Server did not become ready within timeout");
             }
 
-            match ttrpc::asynchronous::Client::connect(uri) {
-                Ok(_) => return Ok(()),
+            match CDHClient::new(uri) {
+                Ok(client) => {
+                    let mut input = confidential_data_hub::UnsealSecretInput::new();
+                    input.set_secret("sealed.readiness-check".into());
+
+                    match client
+                        .sealed_secret_client
+                        .unseal_secret(
+                            ttrpc::context::with_timeout(
+                                AGENT_CONFIG.cdh_api_timeout.as_nanos() as i64
+                            ),
+                            &input,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            let _ = CDH_CLIENT.set(client);
+                            return Ok(());
+                        }
+                        Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    }
+                }
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
