@@ -319,18 +319,14 @@ mod tests {
     struct CdhTestEnv {
         // Keep temp_dir alive so the directory isn't deleted prematurely
         _test_dir: tempfile::TempDir,
-        cdh_sock_uri: String,
+        // Keep server task alive so it doesn't get cancelled
+        _server_handle: tokio::task::JoinHandle<()>,
     }
 
     impl Drop for CdhTestEnv {
         fn drop(&mut self) {
             // Cleanup happens automatically when TempDir is dropped
-        }
-    }
-
-    impl CdhTestEnv {
-        pub fn socket_uri(&self) -> &str {
-            &self.cdh_sock_uri
+            // Server task will be aborted when handle is dropped
         }
     }
 
@@ -374,9 +370,9 @@ mod tests {
             test_dir.path().join(&sock_name).to_str().unwrap()
         );
 
-        // Run the server on the existing test runtime instead of creating a new one
+        // Run the server on the existing test runtime and keep the handle alive
         let server_uri = cdh_sock_uri.clone();
-        tokio::spawn(async move {
+        let server_handle = tokio::spawn(async move {
             start_ttrpc_server(server_uri).await;
         });
         
@@ -389,7 +385,7 @@ mod tests {
 
         CdhTestEnv {
             _test_dir: test_dir,
-            cdh_sock_uri,
+            _server_handle: server_handle,
         }
     }
 
