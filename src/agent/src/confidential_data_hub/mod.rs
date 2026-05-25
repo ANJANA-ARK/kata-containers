@@ -409,22 +409,12 @@ mod tests {
 
         // Test sealed secret as env vars
         let sealed_env = String::from("key=sealed.testdata");
-        match unseal_env(&sealed_env).await {
-            Ok(unsealed_env) => assert_eq!(unsealed_env, String::from("key=unsealed")),
-            Err(_) => {
-                // TTRPC connection may be unstable in test environment, skip this part
-                info!(sl(), "Skipping unseal_env test due to TTRPC connection issue");
-            }
-        }
+        let unsealed_env = unseal_env(&sealed_env).await.unwrap();
+        assert_eq!(unsealed_env, String::from("key=unsealed"));
         
         let normal_env = String::from("key=testdata");
-        match unseal_env(&normal_env).await {
-            Ok(unchanged_env) => assert_eq!(unchanged_env, String::from("key=testdata")),
-            Err(_) => {
-                // TTRPC connection may be unstable, but normal env should work
-                assert_eq!(normal_env, String::from("key=testdata"));
-            }
-        }
+        let unchanged_env = unseal_env(&normal_env).await.unwrap();
+        assert_eq!(unchanged_env, String::from("key=testdata"));
 
         // Test sealed secret as files
         let sealed_dir = test_dir_path.join("..test");
@@ -435,39 +425,24 @@ mod tests {
         let secret_symlink = test_dir_path.join("secret");
         symlink(&sealed_filename, &secret_symlink).unwrap();
 
-        match unseal_file(test_dir_path.to_str().unwrap()).await {
-            Ok(_) => {
-                let unsealed_filename = test_dir_path.join("secret");
-                let mut unsealed_file = File::open(unsealed_filename.clone()).unwrap();
-                let mut contents = String::new();
-                unsealed_file.read_to_string(&mut contents).unwrap();
-                assert_eq!(contents, String::from("unsealed"));
-                fs::remove_file(sealed_filename).unwrap();
-                fs::remove_file(unsealed_filename).unwrap();
-            }
-            Err(_) => {
-                // TTRPC connection may be unstable, clean up and skip
-                info!(sl(), "Skipping unseal_file test due to TTRPC connection issue");
-                fs::remove_file(sealed_filename).unwrap();
-                fs::remove_file(secret_symlink).unwrap();
-            }
-        }
+        unseal_file(test_dir_path.to_str().unwrap()).await.unwrap();
+
+        let unsealed_filename = test_dir_path.join("secret");
+        let mut unsealed_file = File::open(unsealed_filename.clone()).unwrap();
+        let mut contents = String::new();
+        unsealed_file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, String::from("unsealed"));
+        fs::remove_file(sealed_filename).unwrap();
+        fs::remove_file(unsealed_filename).unwrap();
 
         let normal_filename = test_dir_path.join("secret");
         let mut normal_file = File::create(normal_filename.clone()).unwrap();
         normal_file.write_all(b"testdata").unwrap();
-        match unseal_file(test_dir_path.to_str().unwrap()).await {
-            Ok(_) => {
-                let mut contents = String::new();
-                let mut normal_file = File::open(normal_filename.clone()).unwrap();
-                normal_file.read_to_string(&mut contents).unwrap();
-                assert_eq!(contents, String::from("testdata"));
-            }
-            Err(_) => {
-                // TTRPC connection may be unstable, skip
-                info!(sl(), "Skipping normal file test due to TTRPC connection issue");
-            }
-        }
+        unseal_file(test_dir_path.to_str().unwrap()).await.unwrap();
+        let mut contents = String::new();
+        let mut normal_file = File::open(normal_filename.clone()).unwrap();
+        normal_file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, String::from("testdata"));
         fs::remove_file(normal_filename).unwrap();
 
         rt.shutdown_background();
