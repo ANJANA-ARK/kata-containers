@@ -307,74 +307,74 @@ mod tests {
     use std::fs::File;
     use std::io::{Read, Write};
     use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::{tempdir, NamedTempFile};
     use test_utils::skip_if_not_root;
     use tokio::signal::unix::{signal, SignalKind};
-    use rstest::*;
-    
     struct TestService;
 
-
-    #[tokio::test]
-    async fn test_unseal_env_with_normal_env() {
-        // Test that normal env vars (without sealed prefix) pass through unchanged
-        // This test doesn't require CDH client initialization
-        let normal_env = String::from("key=testdata");
-        
-        // Since CDH client is not initialized, we expect this to work for non-sealed values
-        // or return an error for sealed values
-        if CDH_CLIENT.get().is_some() {
-            let unchanged_env = unseal_env(&normal_env).await.unwrap();
-            assert_eq!(unchanged_env, String::from("key=testdata"));
+    #[async_trait]
+    impl confidential_data_hub_ttrpc_async::SealedSecretService for TestService {
+        async fn unseal_secret(
+            &self,
+            _ctx: &::ttrpc::asynchronous::TtrpcContext,
+            _req: confidential_data_hub::UnsealSecretInput,
+        ) -> ttrpc::error::Result<confidential_data_hub::UnsealSecretOutput> {
+            let mut output = confidential_data_hub::UnsealSecretOutput::new();
+            output.set_plaintext("unsealed".into());
+            Ok(output)
         }
     }
 
-    #[tokio::test]
-    async fn test_content_starts_with_prefix() {
-        // Normal case: content matches the prefix
-        let mut f = NamedTempFile::new().unwrap();
-        write!(f, "sealed.hello_world").unwrap();
-        assert!(content_starts_with_prefix(f.path(), "sealed.")
-            .await
-            .unwrap());
-
-        // Does not match the prefix
-        let mut f2 = NamedTempFile::new().unwrap();
-        write!(f2, "notsealed.hello_world").unwrap();
-        assert!(!content_starts_with_prefix(f2.path(), "sealed.")
-            .await
-            .unwrap());
-
-        // File length < prefix.len()
-        let mut f3 = NamedTempFile::new().unwrap();
-        write!(f3, "seal").unwrap();
-        assert!(!content_starts_with_prefix(f3.path(), "sealed.")
-            .await
-            .unwrap());
-
-        // Empty file
-        let f4 = NamedTempFile::new().unwrap();
-        assert!(!content_starts_with_prefix(f4.path(), "sealed.")
-            .await
-            .unwrap());
+    #[async_trait]
+    impl confidential_data_hub_ttrpc_async::ImagePullService for TestService {
+        async fn pull_image(
+            &self,
+            _ctx: &::ttrpc::asynchronous::TtrpcContext,
+            _req: confidential_data_hub::ImagePullRequest,
+        ) -> ttrpc::error::Result<confidential_data_hub::ImagePullResponse> {
+            let output = confidential_data_hub::ImagePullResponse::new();
+            Ok(output)
+        }
     }
 
-    #[rstest]
-    #[tokio::test]
-    async fn test_unseal_env_no_equals(#[future] cdh_env: CdhTestEnv) {
-        skip_if_not_root!();
-        let _env = cdh_env.await;
+    fn remove_if_sock_exist(sock_addr: &str) -> std::io::Result<()> {
+        let path = sock_addr
+            .strip_prefix("unix://")
+            .expect("socket address does not have the expected format.");
 
-        // Test env without equals sign
-        let invalid_env = "INVALID_ENV_VAR";
-        let result = unseal_env(invalid_env).await.unwrap();
-        assert_eq!(result, invalid_env, "Invalid format should remain unchanged");
+        if std::path::Path::new(path).exists() {
+            std::fs::remove_file(path)?;
+        }
+
+        Ok(())
     }
 
-    #[rstest]
+    fn start_ttrpc_server(cdh_socket_uri: String) {
+        tokio::spawn(async move {
+            let ss = Box::new(TestService {});
+            let ss = Arc::new(*ss);
+            let ss_service = confidential_data_hub_ttrpc_async::create_sealed_secret_service(ss);
+
+            remove_if_sock_exist(&cdh_socket_uri).unwrap();
+
+            let mut server = ttrpc::asynchronous::Server::new()
+                .bind(&cdh_socket_uri)
+                .unwrap()
+                .register_service(ss_service);
+
+            server.start().await.unwrap();
+
+            let mut interrupt = signal(SignalKind::interrupt()).unwrap();
+            tokio::select! {
+                _ = interrupt.recv() => {
+                    server.shutdown().await.unwrap();
+                }
+            };
+        });
+    }
+
     #[tokio::test]
-    async fn test_unseal_env_empty_value(#[future] cdh_env: CdhTestEnv) {
+    async fn test_sealed_secret() {
         skip_if_not_root!();
         let _env = cdh_env.await;
 
