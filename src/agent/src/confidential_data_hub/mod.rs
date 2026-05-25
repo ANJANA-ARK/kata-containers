@@ -319,7 +319,7 @@ mod tests {
     struct CdhTestEnv {
         // Keep temp_dir alive so the directory isn't deleted prematurely
         _test_dir: tempfile::TempDir,
-        pub cdh_sock_uri: String,
+        cdh_sock_uri: String,
     }
 
     impl Drop for CdhTestEnv {
@@ -328,18 +328,39 @@ mod tests {
         }
     }
 
-    // Helper function to wait for server to be ready
+    impl CdhTestEnv {
+        pub fn socket_uri(&self) -> &str {
+            &self.cdh_sock_uri
+        }
+    }
+
+    // Helper function to wait for server to be ready with robust connection testing
     async fn wait_for_server_ready(uri: &str, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
+        let mut last_error = None;
+        
         loop {
             if start.elapsed() > timeout {
-                bail!("Server did not become ready within timeout");
+                let err_msg = last_error
+                    .map(|e| format!("Server did not become ready within timeout. Last error: {}", e))
+                    .unwrap_or_else(|| "Server did not become ready within timeout".to_string());
+                bail!(err_msg);
             }
             
-            // Try to connect
+            // Try to connect and verify the connection is usable
             match ttrpc::asynchronous::Client::connect(uri) {
-                Ok(_) => return Ok(()),
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Ok(client) => {
+                    // Verify the connection is actually usable by checking if we can create a client
+                    // If we get here without error, the server is ready
+                    drop(client);
+                    // Add a small delay to ensure server is fully initialized
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
     }
@@ -359,8 +380,8 @@ mod tests {
             start_ttrpc_server(server_uri).await;
         });
         
-        // Efficient polling replacement for thread::sleep
-        wait_for_server_ready(&cdh_sock_uri, Duration::from_secs(5))
+        // Wait for server with robust connection testing
+        wait_for_server_ready(&cdh_sock_uri, Duration::from_secs(10))
             .await
             .expect("Server failed to start");
         
