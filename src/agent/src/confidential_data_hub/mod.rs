@@ -505,15 +505,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_cdh_client_initialized_false() {
-        // Test when CDH client is not initialized
-        // Note: This test assumes CDH_CLIENT is not initialized in this context
-        let is_init = is_cdh_client_initialized();
-        // The result depends on whether other tests have initialized it
-        assert!(is_init || !is_init, "Function should return a boolean");
-    }
-
-    #[tokio::test]
     async fn test_unseal_env_normal_env() {
         skip_if_not_root!();
         let (_test_dir, _cdh_sock_uri, rt) = setup_cdh_test_env("cdh2.sock").await;
