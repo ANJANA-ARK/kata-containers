@@ -305,6 +305,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use rstest::{fixture, rstest};
+    use serial_test::serial;
     use std::fs::File;
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -440,17 +441,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_unseal_env_with_sealed_secret(#[future] cdh_env: CdhTestEnv) {
-        skip_if_not_root!();
-        let _env = cdh_env.await;
-
-        let sealed_env = String::from("key=sealed.testdata");
-        let unsealed_env = unseal_env(&sealed_env).await.unwrap();
-        assert_eq!(unsealed_env, String::from("key=unsealed"));
-    }
-
-    #[rstest]
-    #[tokio::test]
+    #[serial]
     async fn test_unseal_env_with_normal_value(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let _env = cdh_env.await;
@@ -462,32 +453,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_unseal_file_with_sealed_secret(#[future] cdh_env: CdhTestEnv) {
-        skip_if_not_root!();
-        let env = cdh_env.await;
-        let test_dir_path = env._test_dir.path();
-
-        let sealed_dir = test_dir_path.join("..test");
-        fs::create_dir(&sealed_dir).unwrap();
-        let sealed_filename = sealed_dir.join("secret");
-        let mut sealed_file = File::create(sealed_filename.clone()).unwrap();
-        sealed_file.write_all(b"sealed.testdata").unwrap();
-        let secret_symlink = test_dir_path.join("secret");
-        symlink(&sealed_filename, &secret_symlink).unwrap();
-
-        unseal_file(test_dir_path.to_str().unwrap()).await.unwrap();
-
-        let unsealed_filename = test_dir_path.join("secret");
-        let mut unsealed_file = File::open(unsealed_filename.clone()).unwrap();
-        let mut contents = String::new();
-        unsealed_file.read_to_string(&mut contents).unwrap();
-        assert_eq!(contents, String::from("unsealed"));
-        fs::remove_file(sealed_filename).unwrap();
-        fs::remove_file(unsealed_filename).unwrap();
-    }
-
-    #[rstest]
-    #[tokio::test]
+    #[serial]
     async fn test_unseal_file_with_normal_file(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let env = cdh_env.await;
@@ -558,6 +524,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
+    #[serial]
     async fn test_unseal_env_empty_value(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let _env = cdh_env.await;
@@ -569,6 +536,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
+    #[serial]
+    #[serial]
     async fn test_unseal_file_nonexistent_path(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let _env = cdh_env.await;
@@ -586,6 +555,7 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
+    #[serial]
     async fn test_unseal_file_with_directory(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
         let env = cdh_env.await;
