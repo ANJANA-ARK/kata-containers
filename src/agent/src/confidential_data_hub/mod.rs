@@ -304,30 +304,62 @@ pub async fn get_cdh_resource(resource_path: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use rstest::{fixture, rstest};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::{tempdir, NamedTempFile};
     use test_utils::skip_if_not_root;
     use tokio::signal::unix::{signal, SignalKind};
     
     struct TestService;
 
-    // Helper function to setup CDH test environment
-    async fn setup_cdh_test_env(sock_name: &str) -> (tempfile::TempDir, String, tokio::runtime::Runtime) {
+    struct CdhTestEnv {
+        _test_dir: tempfile::TempDir,
+        pub cdh_sock_uri: String,
+    }
+
+    #[fixture]
+    async fn cdh_env() -> CdhTestEnv {
         let test_dir = tempdir().expect("failed to create tmpdir");
+        let sock_name = format!(
+            "cdh-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         let cdh_sock_uri = format!(
             "unix://{}",
-            test_dir.path().join(sock_name).to_str().unwrap()
+            test_dir.path().join(&sock_name).to_str().unwrap()
         );
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
         start_ttrpc_server(cdh_sock_uri.clone());
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        wait_for_server_ready(&cdh_sock_uri, Duration::from_secs(5))
+            .await
+            .expect("Server failed to start");
         init_cdh_client(&cdh_sock_uri).await.unwrap();
 
-        (test_dir, cdh_sock_uri, rt)
+        CdhTestEnv {
+            _test_dir: test_dir,
+            cdh_sock_uri,
+        }
+    }
+
+    async fn wait_for_server_ready(uri: &str, timeout: Duration) -> Result<()> {
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                bail!("Server did not become ready within timeout");
+            }
+
+            match ttrpc::asynchronous::Client::connect(uri) {
+                Ok(_) => return Ok(()),
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
     }
 
     #[async_trait]
@@ -391,32 +423,35 @@ mod tests {
         });
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_sealed_secret() {
+    async fn test_unseal_env_with_sealed_secret(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
-        let test_dir = tempdir().expect("failed to create tmpdir");
-        let test_dir_path = test_dir.path();
-        let cdh_sock_uri = &format!(
-            "unix://{}",
-            test_dir_path.join("cdh.sock").to_str().unwrap()
-        );
+        let _env = cdh_env.await;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        start_ttrpc_server(cdh_sock_uri.to_string());
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        init_cdh_client(cdh_sock_uri).await.unwrap();
-
-        // Test sealed secret as env vars
         let sealed_env = String::from("key=sealed.testdata");
         let unsealed_env = unseal_env(&sealed_env).await.unwrap();
         assert_eq!(unsealed_env, String::from("key=unsealed"));
-        
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_unseal_env_with_normal_value(#[future] cdh_env: CdhTestEnv) {
+        skip_if_not_root!();
+        let _env = cdh_env.await;
+
         let normal_env = String::from("key=testdata");
         let unchanged_env = unseal_env(&normal_env).await.unwrap();
         assert_eq!(unchanged_env, String::from("key=testdata"));
+    }
 
-        // Test sealed secret as files
+    #[rstest]
+    #[tokio::test]
+    async fn test_unseal_file_with_sealed_secret(#[future] cdh_env: CdhTestEnv) {
+        skip_if_not_root!();
+        let env = cdh_env.await;
+        let test_dir_path = env._test_dir.path();
+
         let sealed_dir = test_dir_path.join("..test");
         fs::create_dir(&sealed_dir).unwrap();
         let sealed_filename = sealed_dir.join("secret");
@@ -434,6 +469,14 @@ mod tests {
         assert_eq!(contents, String::from("unsealed"));
         fs::remove_file(sealed_filename).unwrap();
         fs::remove_file(unsealed_filename).unwrap();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_unseal_file_with_normal_file(#[future] cdh_env: CdhTestEnv) {
+        skip_if_not_root!();
+        let env = cdh_env.await;
+        let test_dir_path = env._test_dir.path();
 
         let normal_filename = test_dir_path.join("secret");
         let mut normal_file = File::create(normal_filename.clone()).unwrap();
@@ -444,9 +487,6 @@ mod tests {
         normal_file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, String::from("testdata"));
         fs::remove_file(normal_filename).unwrap();
-
-        rt.shutdown_background();
-        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 
     #[tokio::test]
@@ -479,79 +519,68 @@ mod tests {
             .unwrap());
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_unseal_env_normal_env() {
+    async fn test_unseal_env_normal_env(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
-        let (_test_dir, _cdh_sock_uri, rt) = setup_cdh_test_env("cdh2.sock").await;
+        let _env = cdh_env.await;
 
-        // Test normal environment variable (no sealed prefix)
         let normal_env = "PATH=/usr/bin:/bin";
         let result = unseal_env(normal_env).await.unwrap();
         assert_eq!(result, normal_env, "Normal env should remain unchanged");
-
-        rt.shutdown_background();
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_unseal_env_no_equals() {
+    async fn test_unseal_env_no_equals(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
-        let (_test_dir, _cdh_sock_uri, rt) = setup_cdh_test_env("cdh3.sock").await;
+        let _env = cdh_env.await;
 
-        // Test env without equals sign
         let invalid_env = "INVALID_ENV_VAR";
         let result = unseal_env(invalid_env).await.unwrap();
         assert_eq!(result, invalid_env, "Invalid format should remain unchanged");
-
-        rt.shutdown_background();
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_unseal_env_empty_value() {
+    async fn test_unseal_env_empty_value(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
-        let (_test_dir, _cdh_sock_uri, rt) = setup_cdh_test_env("cdh4.sock").await;
+        let _env = cdh_env.await;
 
-        // Test env with empty value
         let empty_env = "KEY=";
         let result = unseal_env(empty_env).await.unwrap();
         assert_eq!(result, empty_env, "Empty value should remain unchanged");
-
-        rt.shutdown_background();
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_unseal_file_nonexistent_path() {
+    async fn test_unseal_file_nonexistent_path(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
-        let (_test_dir, _cdh_sock_uri, rt) = setup_cdh_test_env("cdh5.sock").await;
+        let _env = cdh_env.await;
 
-        // Test with nonexistent path
         let nonexistent_path = "/nonexistent/path/to/file";
         let result = unseal_file(nonexistent_path).await;
         assert!(result.is_err(), "Should fail with nonexistent path");
 
         if let Err(e) = result {
             let error_msg = format!("{}", e);
-            assert!(error_msg.contains("does not exist"), 
+            assert!(error_msg.contains("does not exist"),
                 "Error should mention file doesn't exist: {}", error_msg);
         }
-
-        rt.shutdown_background();
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_unseal_file_with_directory() {
+    async fn test_unseal_file_with_directory(#[future] cdh_env: CdhTestEnv) {
         skip_if_not_root!();
-        let (test_dir, _cdh_sock_uri, rt) = setup_cdh_test_env("cdh6.sock").await;
-        let test_dir_path = test_dir.path();
+        let env = cdh_env.await;
+        let test_dir_path = env._test_dir.path();
 
-        // Create a subdirectory
         let subdir = test_dir_path.join("subdir");
         fs::create_dir(&subdir).unwrap();
 
-        // Test with directory containing no files
         let result = unseal_file(test_dir_path.to_str().unwrap()).await;
         assert!(result.is_ok(), "Should succeed with empty directory");
-
-        rt.shutdown_background();
     }
 
     #[tokio::test]
