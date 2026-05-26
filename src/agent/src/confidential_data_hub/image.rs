@@ -172,49 +172,35 @@ mod tests {
         metadata
     }
 
-    #[test]
-    fn test_copy_if_not_exists_success() {
+    #[rstest]
+    #[case::simple_copy("source.txt", "subdir/dest.txt", b"test content", true)]
+    #[case::nested_dirs("source.txt", "deep/nested/path/dest.txt", b"test", true)]
+    #[case::overwrite_existing("source.txt", "dest.txt", b"new content", true)]
+    fn test_copy_if_not_exists(
+        #[case] src_name: &str,
+        #[case] dst_name: &str,
+        #[case] content: &[u8],
+        #[case] should_succeed: bool,
+    ) {
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let src_path = temp_dir.path().join("source.txt");
-        let dst_path = temp_dir.path().join("subdir/dest.txt");
+        let src_path = temp_dir.path().join(src_name);
+        let dst_path = temp_dir.path().join(dst_name);
 
-        fs::write(&src_path, b"test content").expect("Failed to write source file");
+        fs::write(&src_path, content).expect("Failed to write source file");
+
+        // For overwrite test, create existing destination
+        if dst_name == "dest.txt" {
+            fs::write(&dst_path, b"old content").expect("Failed to write dest");
+        }
 
         let result = copy_if_not_exists(&src_path, &dst_path);
-        assert!(result.is_ok(), "copy_if_not_exists should succeed");
-        assert!(dst_path.exists(), "Destination file should exist");
+        assert_eq!(result.is_ok(), should_succeed);
 
-        let content = fs::read_to_string(&dst_path).expect("Failed to read dest file");
-        assert_eq!(content, "test content");
-    }
-
-    #[test]
-    fn test_copy_if_not_exists_creates_parent_dirs() {
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let src_path = temp_dir.path().join("source.txt");
-        let dst_path = temp_dir.path().join("deep/nested/path/dest.txt");
-
-        fs::write(&src_path, b"test").expect("Failed to write source file");
-
-        let result = copy_if_not_exists(&src_path, &dst_path);
-        assert!(result.is_ok(), "Should create parent directories");
-        assert!(dst_path.parent().unwrap().exists(), "Parent dirs should exist");
-    }
-
-    #[test]
-    fn test_copy_if_not_exists_overwrites_existing() {
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let src_path = temp_dir.path().join("source.txt");
-        let dst_path = temp_dir.path().join("dest.txt");
-
-        fs::write(&src_path, b"new content").expect("Failed to write source");
-        fs::write(&dst_path, b"old content").expect("Failed to write dest");
-
-        let result = copy_if_not_exists(&src_path, &dst_path);
-        assert!(result.is_ok(), "Should overwrite existing file");
-
-        let content = fs::read_to_string(&dst_path).expect("Failed to read dest");
-        assert_eq!(content, "new content", "Content should be updated");
+        if should_succeed {
+            assert!(dst_path.exists(), "Destination file should exist");
+            let read_content = fs::read(&dst_path).expect("Failed to read dest file");
+            assert_eq!(read_content, content);
+        }
     }
 
     #[test]
@@ -255,72 +241,49 @@ mod tests {
     }
 
 
-    #[test]
-    fn test_get_process_without_guest_pull() {
-        let process = oci::ProcessBuilder::default()
+    // Helper to create a test process
+    fn create_test_process() -> oci::Process {
+        oci::ProcessBuilder::default()
             .args(vec!["test".to_string()])
             .build()
-            .expect("Failed to build process");
-
-        let spec = oci::SpecBuilder::default()
-            .process(process.clone())
-            .build()
-            .expect("Failed to build spec");
-
-        let storages = vec![];
-        let result = get_process(&process, &spec, storages);
-
-        assert!(result.is_ok(), "Should succeed without guest pull");
-        let returned_process = result.unwrap();
-        assert_eq!(returned_process.args(), process.args());
+            .expect("Failed to build process")
     }
 
-    #[test]
-    fn test_get_process_with_non_guest_pull_storage() {
-        let process = oci::ProcessBuilder::default()
-            .args(vec!["test".to_string()])
-            .build()
-            .expect("Failed to build process");
-
-        let spec = oci::SpecBuilder::default()
-            .process(process.clone())
-            .build()
-            .expect("Failed to build spec");
-
+    // Helper to create storage with specific driver
+    fn create_storage(driver: &str) -> protocols::agent::Storage {
         let mut storage = protocols::agent::Storage::new();
-        storage.driver = "other-driver".to_string();
-        let storages = vec![storage];
-
-        let result = get_process(&process, &spec, storages);
-        assert!(result.is_ok(), "Should succeed with non-guest-pull storage");
-        let returned_process = result.unwrap();
-        assert_eq!(returned_process.args(), process.args());
+        storage.driver = driver.to_string();
+        storage
     }
 
-    #[test]
-    fn test_get_process_with_guest_pull_non_sandbox() {
-        let process = oci::ProcessBuilder::default()
-            .args(vec!["test".to_string()])
-            .build()
-            .expect("Failed to build process");
-
-        let mut annotations = HashMap::new();
-        annotations.insert("io.kubernetes.cri.container-type".to_string(), "container".to_string());
-
-        let spec = oci::SpecBuilder::default()
-            .process(process.clone())
-            .annotations(annotations)
-            .build()
-            .expect("Failed to build spec");
-
-        let mut storage = protocols::agent::Storage::new();
-        storage.driver = kata_types::mount::KATA_VIRTUAL_VOLUME_IMAGE_GUEST_PULL.to_string();
-        let storages = vec![storage];
-
+    #[rstest]
+    #[case::no_storage(vec![], None, true)]
+    #[case::non_guest_pull_storage(vec![create_storage("other-driver")], None, true)]
+    #[case::guest_pull_non_sandbox(
+        vec![create_storage(kata_types::mount::KATA_VIRTUAL_VOLUME_IMAGE_GUEST_PULL)],
+        Some(create_metadata("io.kubernetes.cri.container-type", "container")),
+        true
+    )]
+    fn test_get_process_variations(
+        #[case] storages: Vec<protocols::agent::Storage>,
+        #[case] annotations: Option<HashMap<String, String>>,
+        #[case] should_return_original: bool,
+    ) {
+        let process = create_test_process();
+        let mut spec_builder = oci::SpecBuilder::default().process(process.clone());
+        
+        if let Some(ann) = annotations {
+            spec_builder = spec_builder.annotations(ann);
+        }
+        
+        let spec = spec_builder.build().expect("Failed to build spec");
         let result = get_process(&process, &spec, storages);
-        assert!(result.is_ok(), "Should succeed for non-sandbox with guest pull");
-        let returned_process = result.unwrap();
-        assert_eq!(returned_process.args(), process.args());
+
+        assert!(result.is_ok(), "get_process should succeed");
+        if should_return_original {
+            let returned_process = result.unwrap();
+            assert_eq!(returned_process.args(), process.args());
+        }
     }
 
     #[rstest]
@@ -337,29 +300,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_unpack_pause_image_no_pause_bundle() {
-        // This test assumes KATA_PAUSE_BUNDLE doesn't exist
-        let result = unpack_pause_image("valid-container-id");
-        assert!(result.is_err(), "Should fail when pause bundle doesn't exist");
-        
+    // Helper to verify error message contains expected text
+    fn assert_error_contains(result: Result<impl std::fmt::Debug>, expected_msg: &str) {
+        assert!(result.is_err(), "Should return an error");
         if let Err(e) = result {
             let error_msg = format!("{}", e);
-            assert!(error_msg.contains("Pause image not present"), 
-                "Error should mention missing pause image: {}", error_msg);
+            assert!(
+                error_msg.contains(expected_msg),
+                "Error should mention '{}': {}",
+                expected_msg,
+                error_msg
+            );
         }
+    }
+
+    #[test]
+    fn test_unpack_pause_image_no_pause_bundle() {
+        let result = unpack_pause_image("valid-container-id");
+        assert_error_contains(result, "Pause image not present");
     }
 
     #[test]
     fn test_get_pause_image_process_no_bundle() {
         let result = get_pause_image_process();
-        assert!(result.is_err(), "Should fail when pause bundle doesn't exist");
-        
-        if let Err(e) = result {
-            let error_msg = format!("{}", e);
-            assert!(error_msg.contains("Pause image not present"), 
-                "Error should mention missing pause image: {}", error_msg);
-        }
+        assert_error_contains(result, "Pause image not present");
     }
 
     #[test]
